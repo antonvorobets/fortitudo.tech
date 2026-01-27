@@ -22,6 +22,9 @@ from cvxopt.solvers import qp
 from typing import Tuple, Union
 
 
+cvar_tol = 1e-8
+
+
 def _simulation_check(
         R: Union[pd.DataFrame, np.ndarray], p: np.ndarray) -> Tuple[list, np.ndarray, np.ndarray]:
     """Function for preprocessing simulation and probability vector input.
@@ -137,23 +140,27 @@ def portfolio_cvar(
         Portfolio alpha-CVaR.
     """
     pf_pnl, p, alpha = _var_cvar_preprocess(e, R, p, alpha, demean)
-    var = _var_calc(pf_pnl, p, alpha)
-    num_portfolios = e.shape[1]
+    losses = -pf_pnl
+    num_portfolios = pf_pnl.shape[1]
     cvar = np.full((1, num_portfolios), np.nan)
     for port in range(num_portfolios):
-        cvar_idx = pf_pnl[:, port] <= var[0, port]
-        cvar[0, port] = p[cvar_idx, 0].T @ pf_pnl[cvar_idx, port] / np.sum(p[cvar_idx, 0])
-    return _return_portfolio_risk(-cvar)
+        worst_losses_inds = np.flip(np.argsort(losses[:, port]))  # Worst losses first
+        probs_sorted_cumsum = np.cumsum(p[worst_losses_inds])
+        losses_sorted = losses[worst_losses_inds, port]
+        var_index = np.searchsorted(probs_sorted_cumsum, 1 - alpha, 'right')
+        probs_total = probs_sorted_cumsum[var_index - 1]
+        cvar[0, port] = ((losses_sorted[:var_index] @ p[worst_losses_inds][:var_index]
+                          + (1 - alpha - probs_total) * losses_sorted[var_index])
+                         / (1 - alpha))[0]
+    return _return_portfolio_risk(cvar)
 
 
 def _var_calc(pf_pnl: np.ndarray, p: np.ndarray, alpha: float) -> np.ndarray:
     num_portfolios = pf_pnl.shape[1]
     var = np.full((1, num_portfolios), np.nan)
     for port in range(num_portfolios):
-        idx_sorted = np.argsort(pf_pnl[:, port], axis=0)
-        p_sorted = p[idx_sorted, 0]
-        var_index = np.searchsorted(np.cumsum(p_sorted) - p_sorted / 2, 1 - alpha)
-        var[0, port] = np.mean(pf_pnl[idx_sorted[var_index - 1:var_index + 1], port])
+        var[0, port] = np.percentile(
+            pf_pnl[:, port], (1 - alpha) * 100, method='inverted_cdf', weights=p[:, 0])
     return var
 
 
